@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>NEON DRIFT — Survive the Void</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <canvas id="game"></canvas>
+
+    <!-- HUD (visible during play) -->
+    <div id="hud" class="hidden">
+      <div class="hud-left">
+        <div class="stat">
+          <span class="stat-label">SCORE</span>
+          <span id="hud-score" class="stat-value">0</span>
+        </div>
+        <div class="stat combo-stat">
+          <span class="stat-label">COMBO</span>
+          <span id="hud-combo" class="stat-value">x1.0</span>
+        </div>
+      </div>
+      <div class="hud-right">
+        <div id="hud-lives" class="lives"></div>
+      </div>
+    </div>
+
+    <!-- Start Screen -->
+    <div id="start-screen" class="screen">
+      <h1 class="title"><span>NEON</span> DRIFT</h1>
+      <p class="subtitle">Survive the void. Collect the shards. Chase the high score.</p>
+      <div class="menu-buttons">
+        <button id="btn-play" class="btn btn-primary">PLAY</button>
+        <button id="btn-leaderboard" class="btn">LEADERBOARD</button>
+      </div>
+      <div class="controls-hint">
+        <p><strong>Move:</strong> Arrow Keys / WASD &nbsp;•&nbsp; <strong>Touch:</strong> Drag anywhere</p>
+      </div>
+    </div>
+
+    <!-- Game Over Screen -->
+    <div id="gameover-screen" class="screen hidden">
+      <h2 class="gameover-title">RUN ENDED</h2>
+      <p class="final-score">Score: <span id="final-score">0</span></p>
+      <p id="new-record" class="new-record hidden">✦ NEW HIGH SCORE ✦</p>
+
+      <div id="name-entry" class="name-entry">
+        <input id="player-name" maxlength="12" placeholder="ENTER YOUR NAME" autocomplete="off" />
+        <button id="btn-submit-score" class="btn btn-primary">SAVE SCORE</button>
+      </div>
+
+      <div class="menu-buttons">
+        <button id="btn-retry" class="btn btn-primary">PLAY AGAIN</button>
+        <button id="btn-view-leaderboard" class="btn">LEADERBOARD</button>
+        <button id="btn-menu" class="btn">MAIN MENU</button>
+      </div>
+    </div>
+
+    <!-- Leaderboard Screen -->
+    <div id="leaderboard-screen" class="screen hidden">
+      <h2 class="lb-title">TOP DRIFTERS</h2>
+      <ol id="lb-list" class="lb-list"></ol>
+      <div class="menu-buttons">
+        <button id="btn-clear-scores" class="btn btn-danger">CLEAR SCORES</button>
+        <button id="btn-back-menu" class="btn btn-primary">BACK</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="game.js"></script>
+</body>
+</html>
