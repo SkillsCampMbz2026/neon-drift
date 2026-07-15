@@ -56,21 +56,35 @@
   }
 
   function qualifiesForLeaderboard(score) {
-    const list = loadLeaderboard();
-    if (list.length < LB_MAX) return true;
-    return score > list[list.length - 1].score;
+    // Any positive run can be saved — addScore() only ever keeps a player's
+    // personal best, so there's no need to gate this on the top-10 cutoff.
+    return score > 0;
   }
 
+  // One row per player (matched case-insensitively by name). A run only
+  // overwrites that player's row when it beats their existing best score —
+  // it never adds a second row for the same name.
   function addScore(name, score) {
     const list = loadLeaderboard();
-    list.push({ name: name.slice(0, 12) || 'ANON', score: Math.floor(score), date: Date.now() });
+    const cleanName = (name || 'ANON').slice(0, 12);
+    const key = cleanName.trim().toLowerCase();
+    const rounded = Math.floor(score);
+    const idx = list.findIndex(e => e.name.trim().toLowerCase() === key);
+    let isNewBest = false;
+    if (idx === -1) {
+      list.push({ name: cleanName, score: rounded, date: Date.now() });
+      isNewBest = true;
+    } else if (rounded > list[idx].score) {
+      list[idx] = { name: cleanName, score: rounded, date: Date.now() };
+      isNewBest = true;
+    }
     list.sort((a, b) => b.score - a.score);
     const trimmed = list.slice(0, LB_MAX);
     saveLeaderboard(trimmed);
-    return trimmed;
+    return { list: trimmed, isNewBest, name: cleanName };
   }
 
-  function renderLeaderboard() {
+  function renderLeaderboard(highlightName) {
     const list = loadLeaderboard();
     const el = document.getElementById('lb-list');
     el.innerHTML = '';
@@ -81,9 +95,13 @@
       el.appendChild(li);
       return;
     }
+    const highlightKey = highlightName ? highlightName.trim().toLowerCase() : null;
     list.forEach((entry, i) => {
       const li = document.createElement('li');
       li.className = 'lb-row' + (i === 0 ? ' top1' : i === 1 ? ' top2' : i === 2 ? ' top3' : '');
+      if (highlightKey && entry.name.trim().toLowerCase() === highlightKey) {
+        li.classList.add('me');
+      }
       const rank = document.createElement('span');
       rank.className = 'lb-rank';
       rank.textContent = '#' + (i + 1);
@@ -97,6 +115,242 @@
       el.appendChild(li);
     });
   }
+
+  // ---------------------------------------------------------------------
+  // Sound effects — synthesized via Web Audio API, no audio files needed
+  // ---------------------------------------------------------------------
+  const SFX = (() => {
+    const MUTE_KEY = 'neonDrift.muted';
+    let ctx = null;
+    let master = null;
+    let muted = false;
+    try { muted = localStorage.getItem(MUTE_KEY) === '1'; } catch (e) { /* ignore */ }
+
+    function ensureCtx() {
+      if (ctx) return ctx;
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return null;
+      ctx = new AC();
+      master = ctx.createGain();
+      master.gain.value = muted ? 0 : 0.5;
+      master.connect(ctx.destination);
+      return ctx;
+    }
+
+    function unlock() {
+      const c = ensureCtx();
+      if (c && c.state === 'suspended') c.resume();
+    }
+
+    function isMuted() { return muted; }
+
+    function setMuted(m) {
+      muted = m;
+      try { localStorage.setItem(MUTE_KEY, m ? '1' : '0'); } catch (e) { /* ignore */ }
+      if (master) master.gain.setTargetAtTime(m ? 0 : 0.5, ctx.currentTime, 0.05);
+    }
+
+    function tone(freq, dur, opts = {}) {
+      const c = ensureCtx();
+      if (!c) return;
+      const t0 = c.currentTime;
+      const osc = c.createOscillator();
+      const gain = c.createGain();
+      osc.type = opts.type || 'sine';
+      osc.frequency.setValueAtTime(freq, t0);
+      if (opts.slideTo) osc.frequency.exponentialRampToValueAtTime(Math.max(1, opts.slideTo), t0 + dur);
+      const peak = opts.gain !== undefined ? opts.gain : 0.3;
+      gain.gain.setValueAtTime(0.0001, t0);
+      gain.gain.exponentialRampToValueAtTime(peak, t0 + (opts.attack || 0.012));
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      osc.connect(gain);
+      gain.connect(master);
+      osc.start(t0);
+      osc.stop(t0 + dur + 0.03);
+    }
+
+    function noiseBurst(dur, opts = {}) {
+      const c = ensureCtx();
+      if (!c) return;
+      const t0 = c.currentTime;
+      const bufferSize = Math.max(1, Math.floor(c.sampleRate * dur));
+      const buffer = c.createBuffer(1, bufferSize, c.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < bufferSize; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / bufferSize);
+      const src = c.createBufferSource();
+      src.buffer = buffer;
+      const filter = c.createBiquadFilter();
+      filter.type = opts.filterType || 'lowpass';
+      filter.frequency.value = opts.filterFreq || 1200;
+      const gain = c.createGain();
+      gain.gain.setValueAtTime(opts.gain !== undefined ? opts.gain : 0.4, t0);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      src.connect(filter);
+      filter.connect(gain);
+      gain.connect(master);
+      src.start(t0);
+    }
+
+    // ---- Background music: procedural loop, scheduled with a lookahead
+    // timer (standard Web Audio technique) so timing stays sample-accurate
+    // regardless of setInterval jitter. ----
+    const BPM = 92;
+    const STEP_DUR = 60 / BPM / 4; // one 16th note, in seconds
+    const SCHEDULE_AHEAD_SEC = 0.2;
+    const LOOKAHEAD_MS = 25;
+
+    // Am - F - C - G, a moody four-chord loop. Bass root per chord plus the
+    // triad played softly on top as a sustained pad.
+    const PROGRESSION = [
+      { bass: 55.00, pad: [110.00, 130.81, 164.81] }, // Am
+      { bass: 43.65, pad: [87.31, 110.00, 130.81] },  // F
+      { bass: 65.41, pad: [130.81, 164.81, 196.00] }, // C
+      { bass: 49.00, pad: [98.00, 123.47, 146.83] },  // G
+    ];
+
+    let musicGain = null;
+    let musicOn = false;
+    let schedulerId = null;
+    let nextStepTime = 0;
+    let stepIndex = 0;
+
+    function playPadChord(freqs, t, dur) {
+      const c = ensureCtx();
+      freqs.forEach((f, i) => {
+        const osc = c.createOscillator();
+        const g = c.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(f, t);
+        osc.detune.value = (i - 1) * 4;
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.exponentialRampToValueAtTime(0.05, t + 0.7);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+        osc.connect(g);
+        g.connect(musicGain);
+        osc.start(t);
+        osc.stop(t + dur + 0.05);
+      });
+    }
+
+    function playBassNote(freq, t, dur, peak) {
+      const c = ensureCtx();
+      const osc = c.createOscillator();
+      const g = c.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(freq, t);
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(peak || 0.16, t + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      osc.connect(g);
+      g.connect(musicGain);
+      osc.start(t);
+      osc.stop(t + dur + 0.05);
+    }
+
+    function playHat(t) {
+      const c = ensureCtx();
+      const bufferSize = Math.floor(c.sampleRate * 0.04);
+      const buffer = c.createBuffer(1, bufferSize, c.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < bufferSize; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / bufferSize);
+      const src = c.createBufferSource();
+      src.buffer = buffer;
+      const filter = c.createBiquadFilter();
+      filter.type = 'highpass';
+      filter.frequency.value = 6000;
+      const g = c.createGain();
+      g.gain.setValueAtTime(0.05, t);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.04);
+      src.connect(filter);
+      filter.connect(g);
+      g.connect(musicGain);
+      src.start(t);
+    }
+
+    function scheduleStep(idx, t) {
+      const chord = PROGRESSION[Math.floor(idx / 16) % PROGRESSION.length];
+      const s = idx % 16;
+      if (s === 0) {
+        playPadChord(chord.pad, t, STEP_DUR * 16 * 1.05);
+        playBassNote(chord.bass, t, STEP_DUR * 3.5);
+      } else if (s === 8) {
+        playBassNote(chord.bass * 1.5, t, STEP_DUR * 3.5);
+      } else if (s === 4 || s === 12) {
+        playBassNote(chord.bass * 2, t, STEP_DUR * 1.8, 0.1);
+      }
+      if (s % 4 === 2) playHat(t);
+    }
+
+    function schedulerTick() {
+      const c = ensureCtx();
+      if (!c) return;
+      while (nextStepTime < c.currentTime + SCHEDULE_AHEAD_SEC) {
+        scheduleStep(stepIndex, nextStepTime);
+        nextStepTime += STEP_DUR;
+        stepIndex++;
+      }
+    }
+
+    function startMusic() {
+      const c = ensureCtx();
+      if (!c || musicOn) return;
+      if (!musicGain) {
+        musicGain = c.createGain();
+        musicGain.gain.value = 1;
+        musicGain.connect(master);
+      }
+      musicOn = true;
+      stepIndex = 0;
+      nextStepTime = c.currentTime + 0.1;
+      schedulerId = setInterval(schedulerTick, LOOKAHEAD_MS);
+    }
+
+    function stopMusic() {
+      musicOn = false;
+      if (schedulerId) { clearInterval(schedulerId); schedulerId = null; }
+    }
+
+    return {
+      unlock,
+      isMuted,
+      setMuted,
+      startMusic,
+      stopMusic,
+      click() {
+        tone(720, 0.08, { type: 'triangle', gain: 0.16, slideTo: 900 });
+      },
+      orb(comboLevel) {
+        const base = 520 + clamp((comboLevel - 1) * 60, 0, 260);
+        tone(base, 0.16, { type: 'square', gain: 0.2, slideTo: base * 1.7, attack: 0.005 });
+      },
+      hit() {
+        noiseBurst(0.22, { gain: 0.45, filterFreq: 900 });
+        tone(140, 0.25, { type: 'sawtooth', gain: 0.28, slideTo: 50 });
+      },
+      gameOver() {
+        tone(420, 0.6, { type: 'sawtooth', gain: 0.26, slideTo: 60, attack: 0.02 });
+        noiseBurst(0.5, { gain: 0.22, filterFreq: 500 });
+      },
+      newBest() {
+        [523.25, 659.25, 783.99, 1046.5].forEach((f, i) => {
+          setTimeout(() => tone(f, 0.28, { type: 'triangle', gain: 0.24, attack: 0.01 }), i * 90);
+        });
+      },
+      start() {
+        tone(220, 0.3, { type: 'sine', gain: 0.2, slideTo: 660, attack: 0.01 });
+      },
+    };
+  })();
+
+  window.addEventListener('pointerdown', () => { SFX.unlock(); SFX.startMusic(); }, { passive: true });
+  window.addEventListener('keydown', () => { SFX.unlock(); SFX.startMusic(); });
+  document.addEventListener('click', e => {
+    if (e.target.closest && e.target.closest('.btn')) {
+      SFX.unlock();
+      SFX.startMusic();
+      SFX.click();
+    }
+  }, { capture: true });
 
   // ---------------------------------------------------------------------
   // Background: parallax starfield + drifting nebula blobs
@@ -534,6 +788,9 @@
   }
 
   function startGame() {
+    SFX.unlock();
+    SFX.startMusic();
+    SFX.start();
     score = 0; combo = 1; lives = 3;
     obstacles = []; orbs = []; particles = [];
     obstacleTimer = 0.6; orbTimer = 1.0; elapsed = 0;
@@ -546,6 +803,7 @@
 
   function endGame() {
     state = STATE.GAMEOVER;
+    SFX.gameOver();
     hud.classList.add('hidden');
     document.getElementById('final-score').textContent = Math.floor(score);
     const qualifies = qualifiesForLeaderboard(score) && score > 0;
@@ -569,6 +827,7 @@
         orbs.splice(i, 1);
         combo = Math.min(5, combo + 0.15);
         score += 10 * combo;
+        SFX.orb(combo);
         emit(orb.x, orb.y, 16, {
           spread: TAU, speedMin: 60, speedMax: 180, lifeMin: 0.3, lifeMax: 0.7,
           sizeMin: 1.5, sizeMax: 3.5, color: ['#ffe14b', '#fff6d0'], drag: 0.92,
@@ -585,6 +844,7 @@
           combo = 1;
           player.invuln = 1.6;
           addShake(14, 0.4);
+          SFX.hit();
           emit(player.x, player.y, 26, {
             spread: TAU, speedMin: 80, speedMax: 260, lifeMin: 0.3, lifeMax: 0.8,
             sizeMin: 2, sizeMax: 4.5, color: ['#ff3ec9', '#8c5cff', '#fff'], drag: 0.9,
@@ -643,34 +903,50 @@
   document.getElementById('btn-menu').addEventListener('click', () => { state = STATE.MENU; showScreen('start'); });
   document.getElementById('btn-back-menu').addEventListener('click', () => { state = STATE.MENU; showScreen('start'); });
 
+  let lastSavedName = null;
+
   document.getElementById('btn-leaderboard').addEventListener('click', () => {
     state = STATE.LEADERBOARD;
-    renderLeaderboard();
+    renderLeaderboard(null);
     showScreen('leaderboard');
   });
   document.getElementById('btn-view-leaderboard').addEventListener('click', () => {
     state = STATE.LEADERBOARD;
-    renderLeaderboard();
+    renderLeaderboard(lastSavedName);
     showScreen('leaderboard');
   });
 
   document.getElementById('btn-clear-scores').addEventListener('click', () => {
     if (confirm('Clear all leaderboard scores? This cannot be undone.')) {
       saveLeaderboard([]);
-      renderLeaderboard();
+      lastSavedName = null;
+      renderLeaderboard(null);
     }
   });
 
   function submitScore() {
     const input = document.getElementById('player-name');
     const name = input.value.trim() || 'ANON';
-    addScore(name, score);
+    const result = addScore(name, score);
+    lastSavedName = result.name;
+    if (result.isNewBest) SFX.newBest();
     document.getElementById('name-entry').classList.add('hidden');
   }
   document.getElementById('btn-submit-score').addEventListener('click', submitScore);
   document.getElementById('player-name').addEventListener('keydown', e => {
     if (e.key === 'Enter') submitScore();
   });
+
+  const muteBtn = document.getElementById('btn-mute');
+  function refreshMuteBtn() {
+    muteBtn.textContent = SFX.isMuted() ? 'SOUND: OFF' : 'SOUND: ON';
+    muteBtn.classList.toggle('muted', SFX.isMuted());
+  }
+  muteBtn.addEventListener('click', () => {
+    SFX.setMuted(!SFX.isMuted());
+    refreshMuteBtn();
+  });
+  refreshMuteBtn();
 
   showScreen('start');
 })();
