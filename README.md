@@ -2,7 +2,7 @@
 
 A 2D neon space-dodger built with plain HTML5 Canvas + JavaScript — no frameworks, no build step.
 
-**[Play it live](#)** *(link added after GitHub Pages deploy)*
+**[Play it live](https://skillscampmbz2026.github.io/neon-drift/)**
 
 ## Gameplay
 
